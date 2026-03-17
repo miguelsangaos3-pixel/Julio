@@ -2,38 +2,54 @@ from flask import Flask, render_template_string, request, send_file
 import pandas as pd
 import json
 import io
+from openpyxl.styles import Font, Alignment, PatternFill
 
 app = Flask(__name__)
 
-# Campos específicos de los productos
 CAMPOS_PRODUCTO = ['numItem', 'cantidad', 'descripcion', 'precioUni', 'montoDescu', 'ventaGravada']
 
+# Estilo "Verdecito" restaurado
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="UTF-8">
-    <title>Extractor Contable</title>
+    <title>Convertidor DE JSON</title>
     <style>
-        body { font-family: 'Segoe UI', sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #eef2f3; }
-        .card { background: white; padding: 40px; border-radius: 15px; box-shadow: 0 10px 25px rgba(0,0,0,0.1); text-align: center; border-top: 10px solid #facc15; }
-        h2 { color: #854d0e; }
-        button { background: #facc15; color: #854d0e; border: none; padding: 12px 25px; cursor: pointer; border-radius: 8px; font-weight: bold; }
-        button:hover { background: #fde047; }
+        body { font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #e8f5e9; }
+        .card { background: white; padding: 40px; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); text-align: center; border-top: 8px solid #4caf50; }
+        h2 { color: #2e7d32; }
+        button { background: #4caf50; color: white; border: none; padding: 12px 24px; cursor: pointer; border-radius: 4px; font-size: 16px; font-weight: bold; }
+        button:hover { background: #388e3c; }
+        p { color: #666; }
     </style>
 </head>
 <body>
     <div class="card">
-        <h2>📑 Extractor de Json </h2>
-        <p>Estraer Json</p>
+        <h2>📂 Extractor de JSON</h2>
+        <p>Extractor  de Json </p>
         <form method="post" enctype="multipart/form-data">
             <input type="file" name="file" accept=".json" multiple required><br>
-            <button type="submit">Generar Reporte</button>
+            <button type="submit">Generar Reporte Excel</button>
         </form>
     </div>
 </body>
 </html>
 '''
+
+def estilizar_excel(ws, titulo):
+    # Centrar y dar formato al título en la fila 1
+    ws.merge_cells('A1:B1')
+    top_cell = ws['A1']
+    top_cell.value = titulo.upper()
+    top_cell.font = Font(name='Arial', size=14, bold=True, color="FFFFFF")
+    top_cell.alignment = Alignment(horizontal='center')
+    # Color verde oscuro para el encabezado del Excel también
+    top_cell.fill = PatternFill(start_color="2E7D32", end_color="2E7D32", fill_type="solid")
+    
+    # Ajuste de anchos para que todo quepa bien
+    ws.column_dimensions['A'].width = 35
+    ws.column_dimensions['B'].width = 60
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
@@ -46,57 +62,50 @@ def index():
                     try:
                         data = json.load(file)
                         
-                        # 1. Título Dinámico
-                        tipo_dte = data.get('identificacion', {}).get('tipoDte', '00')
-                        nombre_doc = "COMPROBANTE DE CRÉDITO FISCAL" if tipo_dte == '03' else "FACTURA CONSUMIDOR FINAL"
+                        # Identificación del tipo de documento
+                        tipo = data.get('identificacion', {}).get('tipoDte', '01')
+                        nombre_doc = "COMPROBANTE DE CRÉDITO FISCAL" if tipo == '03' else "FACTURA CONSUMIDOR FINAL"
                         
-                        # 2. SECCIÓN: DATOS GENERALES (Identificación, Emisor, Receptor)
-                        # Combinamos las ramas principales para no perder nada de lo amarillo
-                        gen_data = {
-                            'identificacion': data.get('identificacion', {}),
-                            'emisor': data.get('emisor', {}),
-                            'receptor': data.get('receptor', {}),
-                            'respuestaMH': data.get('responseMH', {})
+                        # Datos que marcaste en amarillo (Emisor, Receptor, MH)
+                        secciones_interes = {
+                            '1. IDENTIFICACION': data.get('identificacion', {}),
+                            '2. EMISOR': data.get('emisor', {}),
+                            '3. RECEPTOR': data.get('receptor', {}),
+                            '4. RESPUESTA MH (SELLOS)': data.get('responseMH', {})
                         }
-                        df_general = pd.json_normalize(gen_data, sep='.').T.reset_index()
+                        df_general = pd.json_normalize(secciones_interes, sep='.').T.reset_index()
                         df_general.columns = ['Campo', 'Valor']
 
-                        # 3. SECCIÓN: PRODUCTOS (Cuerpo del Documento)
-                        cuerpo = data.get('cuerpoDocumento', [])
-                        df_productos = pd.DataFrame(cuerpo)
-                        if not df_productos.empty:
-                            columnas_reales = [c for c in CAMPOS_PRODUCTO if c in df_productos.columns]
-                            df_productos = df_productos[columnas_reales]
+                        # Cuerpo del documento (Productos)
+                        df_prod = pd.DataFrame(data.get('cuerpoDocumento', []))
+                        if not df_prod.empty:
+                            df_prod = df_prod[[c for c in CAMPOS_PRODUCTO if c in df_prod.columns]]
 
-                        # 4. SECCIÓN: TOTALES (Resumen)
-                        df_resumen = pd.json_normalize(data.get('resumen', {}), sep='.').T.reset_index()
-                        df_resumen.columns = ['Campo', 'Valor']
+                        # Resumen de totales
+                        df_res = pd.json_normalize(data.get('resumen', {}), sep='.').T.reset_index()
+                        df_res.columns = ['Campo', 'Valor']
 
-                        # --- CONSTRUCCIÓN DE LA HOJA ---
-                        sheet_name = f"Doc_{idx+1}"
+                        # Crear la hoja
+                        sheet_name = f"Documento_{idx+1}"
+                        df_general.to_excel(writer, index=False, sheet_name=sheet_name, startrow=2)
                         
-                        # Encabezado Principal
-                        encabezado = pd.DataFrame([['TIPO DOCUMENTO', nombre_doc], ['ORIGEN', file.filename], ['='*30, '='*30]], columns=['Campo', 'Valor'])
-                        encabezado.to_excel(writer, index=False, sheet_name=sheet_name, startrow=0)
-                        
-                        # Escribir Datos Generales (Emisor, Receptor, MH)
-                        punto_productos = 5 + len(df_general)
-                        df_general.to_excel(writer, index=False, sheet_name=sheet_name, startrow=4)
-                        
-                        # Escribir Productos
-                        pd.DataFrame([['--- DETALLE DE PRODUCTOS ---', '']]).to_excel(writer, index=False, header=False, sheet_name=sheet_name, startrow=punto_productos + 1)
-                        df_productos.to_excel(writer, index=False, sheet_name=sheet_name, startrow=punto_productos + 2)
-                        
-                        # Escribir Totales
-                        punto_resumen = punto_productos + len(df_productos) + 4
-                        pd.DataFrame([['--- RESUMEN Y TOTALES ---', '']]).to_excel(writer, index=False, header=False, sheet_name=sheet_name, startrow=punto_resumen)
-                        df_resumen.to_excel(writer, index=False, header=False, sheet_name=sheet_name, startrow=punto_resumen + 1)
+                        ws = writer.sheets[sheet_name]
+                        estilizar_excel(ws, nombre_doc)
 
-                    except Exception as e:
-                        continue
+                        # Escribir productos debajo de los datos generales
+                        gap = 4 + len(df_general)
+                        ws.cell(row=gap, column=1, value="--- DETALLE DE PRODUCTOS ---").font = Font(bold=True)
+                        df_prod.to_excel(writer, index=False, sheet_name=sheet_name, startrow=gap)
+
+                        # Escribir totales al final
+                        gap_res = gap + len(df_prod) + 2
+                        ws.cell(row=gap_res, column=1, value="--- TOTALES Y RESUMEN ---").font = Font(bold=True)
+                        df_res.to_excel(writer, index=False, header=False, sheet_name=sheet_name, startrow=gap_res)
+
+                    except Exception: continue
 
             output.seek(0)
-            return send_file(output, download_name="reporte_contable_completo.xlsx", as_attachment=True)
+            return send_file(output, download_name="Reporte de Json .xlsx", as_attachment=True)
             
     return render_template_string(HTML_TEMPLATE)
 
